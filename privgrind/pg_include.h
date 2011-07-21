@@ -13,7 +13,9 @@ typedef
    struct _PG_Func {
       struct _PG_Func*  next;
       UWord             key;            
-      Char *            fnname;
+      Char *            fnname;     
+      Char *            filename;
+      Char *            dirname;
       UWord             id;
    }
    PG_Func;

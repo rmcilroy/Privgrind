@@ -16,7 +16,9 @@
 
 #include "pg_include.h"
 
-#define FN_LENGTH 100
+#define FN_LENGTH   100
+#define FILENAME_LENGTH 100
+#define DIRNAME_LENGTH  512
 #define UNKNOWN_FUNC_ID 0
 
 static Bool clo_trace_mem       = True;
@@ -61,6 +63,8 @@ static void pg_post_clo_init(void)
    /* Add a node for unknown functions */
    PG_Func *func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
    func->fnname = "<Unknown>";
+   func->filename = "";
+   func->dirname = "";
    func->key = hash_sdbm(func->fnname);
    func->id = curr_func_id++;
    tl_assert(func->id == UNKNOWN_FUNC_ID);
@@ -288,7 +292,6 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
 {
    Int        i;
    IRSB*      sbOut;
-   Char       fnname[FN_LENGTH];
    IRTypeEnv* tyenv = sbIn->tyenv;
    UWord      func_id = -1;       
 
@@ -312,6 +315,7 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
    }
    
    if (i < sbIn->stmts_used) {
+     Char fnname[FN_LENGTH];
      tl_assert(sbIn->stmts[i]->tag == Ist_IMark);
      Bool found_fn = VG_(get_fnname)(sbIn->stmts[i]->Ist.IMark.addr,
 				     fnname, FN_LENGTH);
@@ -321,11 +325,20 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
        UWord key = hash_sdbm(fnname);
        PG_Func * func = VG_(HT_lookup) ( func_ht, key );
        if (func == NULL) {
+	 UInt linenum;
+	 Bool dirname_available;
 	 func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
 	 func->key = key;
-	 func->fnname = VG_(malloc) ("func_ht.node.fnname", strlen(fnname));
-	 memcpy(func->fnname, fnname, strlen(fnname));
 	 func->id = curr_func_id++;
+	 func->fnname = VG_(malloc) ("func_ht.node.fnname", strlen(fnname));
+	 func->filename = VG_(malloc)("func_ht.node.filename", FILENAME_LENGTH);
+	 func->dirname  = VG_(malloc)("func_ht.node.dirname", DIRNAME_LENGTH);
+	 memcpy(func->fnname, fnname, strlen(fnname));
+	 VG_(get_filename_linenum) ( sbIn->stmts[i]->Ist.IMark.addr, 
+				     func->filename, FILENAME_LENGTH,
+				     func->dirname,  DIRNAME_LENGTH,
+				     &dirname_available,
+				     &linenum );
 	 VG_(HT_add_node) ( func_ht, func );
        }
        func_id = func->id;
@@ -470,9 +483,13 @@ static void pg_fini(Int exitcode)
 
   VG_(HT_ResetIter)(func_ht);
   while ( (func = VG_(HT_Next)(func_ht)) ) {
-    VG_(printf) ("FUNC: %s : %lu\n", func->fnname, func->id);
-    if (func->id != UNKNOWN_FUNC_ID) 
+    VG_(printf) ("FUNC: %lu %s (%s%s)\n", func->id, func->fnname,
+		 func->dirname, func->filename);
+    if (func->id != UNKNOWN_FUNC_ID) { 
       VG_(free) (func->fnname);
+      VG_(free) (func->filename);
+      VG_(free) (func->dirname);
+    }
   }
 
   VG_(HT_ResetIter)(addr_ht);
