@@ -171,6 +171,9 @@ perf/Makefile.in
 perf/vg_perf
 privgrind/privgrind-amd64-linux
 privgrind/privgrind-x86-linux
+privgrind/Makefile.in
+privgrind/Makefile
+privgrind/tests/Makefile
 stamp-h1
 tests/Makefile
 tests/Makefile.in

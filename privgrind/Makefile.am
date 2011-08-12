@@ -11,7 +11,7 @@ if VGCONF_HAVE_PLATFORM_SEC
 noinst_PROGRAMS += privgrind-@VGCONF_ARCH_SEC@-@VGCONF_OS@
 endif
 
-PRIVGRIND_SOURCES_COMMON = pg_main.c
+PRIVGRIND_SOURCES_COMMON = pg_main.c pg_malloc_wrappers.c
 
 privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_SOURCES      = \
 	$(PRIVGRIND_SOURCES_COMMON)
@@ -24,7 +24,7 @@ privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_DEPENDENCIES = \
 privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_LDADD        = \
 	$(TOOL_LDADD_@VGCONF_PLATFORM_PRI_CAPS@)
 privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_LDFLAGS      = \
-	$(TOOL_LDFLAGS_@VGCONF_PLATFORM_PRI_CAPS@)
+	$(TOOL_LDFLAGS_@VGCONF_PLATFORM_PRI_CAPS@) 
 privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_LINK = \
 	$(top_builddir)/coregrind/link_tool_exe_@VGCONF_OS@ \
 	@VALT_LOAD_ADDRESS_PRI@ \
@@ -51,6 +51,51 @@ privgrind_@VGCONF_ARCH_SEC@_@VGCONF_OS@_LINK = \
 	$(LINK) \
 	$(privgrind_@VGCONF_ARCH_SEC@_@VGCONF_OS@_CFLAGS) \
 	$(privgrind_@VGCONF_ARCH_SEC@_@VGCONF_OS@_LDFLAGS)
+endif
+
+
+#----------------------------------------------------------------------------
+# vgpreload_privgrind-<platform>.so
+#----------------------------------------------------------------------------
+
+noinst_PROGRAMS += vgpreload_privgrind-@VGCONF_ARCH_PRI@-@VGCONF_OS@.so
+if VGCONF_HAVE_PLATFORM_SEC
+noinst_PROGRAMS += vgpreload_privgrind-@VGCONF_ARCH_SEC@-@VGCONF_OS@.so
+endif
+
+if VGCONF_OS_IS_DARWIN
+noinst_DSYMS = $(noinst_PROGRAMS)
+endif
+
+VGPRELOAD_PRIVGRIND_SOURCES_COMMON = pg_main.c pg_malloc_wrappers.c 
+
+vgpreload_privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_SOURCES      = \
+	$(VGPRELOAD_PRIVGRIND_SOURCES_COMMON)
+vgpreload_privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_CPPFLAGS     = \
+	$(AM_CPPFLAGS_@VGCONF_PLATFORM_PRI_CAPS@)
+vgpreload_privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_CFLAGS       = \
+	$(AM_CFLAGS_@VGCONF_PLATFORM_PRI_CAPS@) $(AM_CFLAGS_PIC) -O2\
+	-I../coregrind
+vgpreload_privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_DEPENDENCIES = \
+	$(LIBREPLACEMALLOC_@VGCONF_PLATFORM_PRI_CAPS@) 
+vgpreload_privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_LDFLAGS      = \
+	$(PRELOAD_LDFLAGS_@VGCONF_PLATFORM_PRI_CAPS@) \
+	$(LIBREPLACEMALLOC_LDFLAGS_@VGCONF_PLATFORM_PRI_CAPS@)
+
+
+if VGCONF_HAVE_PLATFORM_SEC
+vgpreload_privgrind_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_SOURCES      = \
+	$(VGPRELOAD_PRIVGRIND_SOURCES_COMMON)
+vgpreload_privgrind_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_CPPFLAGS     = \
+	$(AM_CPPFLAGS_@VGCONF_PLATFORM_SEC_CAPS@)
+vgpreload_privgrind_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_CFLAGS       = \
+	$(AM_CFLAGS_@VGCONF_PLATFORM_SEC_CAPS@) $(AM_CFLAGS_PIC) -O2 \
+	-I../coregrind
+vgpreload_privgrind_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_DEPENDENCIES = \
+	$(LIBREPLACEMALLOC_@VGCONF_PLATFORM_SEC_CAPS@) 
+vgpreload_privgrind_@VGCONF_ARCH_SEC@_@VGCONF_OS@_so_LDFLAGS      = \
+	$(PRELOAD_LDFLAGS_@VGCONF_PLATFORM_SEC_CAPS@) \
+	$(LIBREPLACEMALLOC_LDFLAGS_@VGCONF_PLATFORM_SEC_CAPS@) 
 endif
 
 

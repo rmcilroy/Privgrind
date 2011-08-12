@@ -6,6 +6,12 @@
 #define __PG_INCLUDE__
 
 #include "pub_tool_hashtable.h"
+#include "valgrind.h"
+
+#define PG_(str)    VGAPPEND(vgPrivGrind_,str)
+
+/* This is set the same as memcheck, but might not need be as large */
+#define PG_MALLOC_REDZONE_SZB    16
 
 /* This describes a function. Nb: first two fields must match core's
  * VgHashNode. */
@@ -23,12 +29,23 @@ typedef
 /* This describes access to a data object. Nb: first two fields must match 
  * core's VgHashNode. */
 typedef
-   struct _PG_Addr {
-      struct _PG_Addr*  next;
-      UWord             addr;  
+   struct _PG_PageRange {
+      struct _PG_PageRecord*  next;
+      Addr page_addr;
+      struct _PG_DataObj*  first;
+   }
+   PG_PageRange;
+
+/* This describes access to a data object */
+typedef
+   struct _PG_DataObj {
+      struct _PG_DataObj*  next;
+      struct _PG_DataObj*  prev;
+      Addr              addr;  
+      SizeT             size;  
       VgHashTable       access_ht;
    }
-   PG_Addr;
+   PG_DataObj;
 
 typedef
    struct _PG_Access {
@@ -49,5 +66,22 @@ static inline UWord hash_sdbm(Char *str)
   
   return hash;
 }
+
+/* pg_main.c */
+void PG_(dataobj_node_malloced)( Addr addr, SizeT size );
+void PG_(dataobj_node_freed)( Addr addr );
+PG_DataObj * PG_(dataobj_get_node)( Addr addr );
+
+/* pg_malloc_wrappers.c */
+void* PG_(malloc) (ThreadId tid, SizeT size);
+void* PG_(__builtin_new)(ThreadId tid, SizeT size);
+void* PG_(__builtin_vec_new) (ThreadId tid, SizeT size);
+void* PG_(memalign) (ThreadId tid, SizeT alignB, SizeT size);
+void* PG_(calloc) (ThreadId tid, SizeT nmemb, SizeT size1);
+void PG_(free) (ThreadId tid, void* addr);
+void PG_(__builtin_delete) (ThreadId tid, void* addr);
+void PG_(__builtin_vec_delete) (ThreadId tid, void* addr);
+void* PG_(realloc) (ThreadId tid, void* addr, SizeT new_size);
+SizeT PG_(malloc_usable_size) (ThreadId tid, void* addr);
 
 #endif

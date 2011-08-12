@@ -3,20 +3,18 @@
 /*--------------------------------------------------------------------*/
 
 #include "pub_tool_basics.h"
-#include "pub_tool_tooliface.h"
+#include "pub_tool_redir.h"
+#include "pub_tool_mallocfree.h"
+#include "pub_tool_replacemalloc.h" 
+#include "pub_tool_execontext.h"
+#include "pub_tool_libcbase.h"
 #include "pub_tool_libcassert.h"
 #include "pub_tool_libcprint.h"
-#include "pub_tool_debuginfo.h"
-#include "pub_tool_libcbase.h"
-#include "pub_tool_mallocfree.h"
-#include "pub_tool_stacktrace.h"
-#include "pub_tool_replacemalloc.h"  
+#include "assert.h"
 
 #include "pg_include.h"
 
-static void dataobj_node_freed( Addr addr ) {}
-static void dataobj_node_malloced( Addr addr, SizeT size ) {}
-static PG_DataObj * dataobj_get_node( Addr addr ) { return NULL; }
+#define DEFAULT_ALIGN 16
 
 /* Allocate memory and note memory allocated */
 static void* PG_(new_obj)  ( ThreadId tid, SizeT szB, SizeT alignB, 
@@ -34,36 +32,31 @@ static void* PG_(new_obj)  ( ThreadId tid, SizeT szB, SizeT alignB,
   } 
   ec = VG_(record_ExeContext)(tid, 0/*first_ip_delta*/);
   tl_assert(ec);
+  PG_(dataobj_node_malloced)( (Addr) p, szB );
 
-  VG_(printf)("alloc %p size %d\n", p, (int)szB);
-  dataobj_node_malloced((Addr)p, szB);
-  
   return p;
 }
 
 
 static void PG_(handle_free) ( ThreadId tid, void *p )
 {
-
-  VG_(printf)("free %p\n", p);
-  dataobj_node_freed( (Addr)p );
-
+  PG_(dataobj_node_freed)( (Addr) p );
   VG_(cli_free) ( p );
 }
 
 void* PG_(malloc) (ThreadId tid, SizeT size) 
 {
-  return PG_(new_obj) ( tid, size, VG_(clo_alignment), False);
+  return PG_(new_obj) ( tid, size, DEFAULT_ALIGN, False);
 }
 
 void* PG_(__builtin_new)(ThreadId tid, SizeT size)
 {
-  return PG_(new_obj) ( tid, size, VG_(clo_alignment), False);
+  return PG_(new_obj) ( tid, size, DEFAULT_ALIGN, False);
 }
 
 void* PG_(__builtin_vec_new) (ThreadId tid, SizeT size)
 {
-  return PG_(new_obj) ( tid, size, VG_(clo_alignment), False);
+  return PG_(new_obj) ( tid, size, DEFAULT_ALIGN, False);
 }
 
 void* PG_(memalign) (ThreadId tid, SizeT alignB, SizeT size)
@@ -73,7 +66,7 @@ void* PG_(memalign) (ThreadId tid, SizeT alignB, SizeT size)
 
 void* PG_(calloc) (ThreadId tid, SizeT nmemb, SizeT size1)
 {
-  return PG_(new_obj) ( tid, nmemb*size1, VG_(clo_alignment), True );
+  return PG_(new_obj) ( tid, nmemb*size1, DEFAULT_ALIGN, True );
 }
 
 void PG_(free) (ThreadId tid, void* addr)
@@ -98,16 +91,17 @@ void* PG_(realloc) (ThreadId tid, void* addr, SizeT new_szB)
    SizeT      old_szB;
 
    /* Get the old block info */
-   obj = dataobj_get_node((Addr)addr);
+   obj = PG_(dataobj_get_node)((Addr)addr);
    if (obj == NULL) {
       return NULL;
    }
 
+   obj = PG_(dataobj_get_node)( (Addr) addr );
+   p_old   = addr; 
    old_szB = obj->size;
-   p_old   = (void*) obj->addr; 
 
    /* Get new memory */
-   p_new = VG_(cli_malloc)(VG_(clo_alignment), new_szB);
+   p_new = VG_(cli_malloc)(DEFAULT_ALIGN, new_szB);
 
    if (p_new) {
      /* Copy from old to new */
@@ -117,21 +111,22 @@ void* PG_(realloc) (ThreadId tid, void* addr, SizeT new_szB)
      VG_(cli_free) ( p_old );
 
      /* update data access node */
+     obj->addr = p_new;
      obj->size = new_szB;
-     obj->addr = (Addr)p_new;
-
    } else {
-     /* free address and remove from database, we will be returning null */
-     VG_(cli_free) ( p_old );
-     dataobj_node_freed( (Addr) p_old );
+     /* remove old address from live database */
+     PG_(dataobj_node_freed)( (Addr) addr );
    }
+   
+   /* free old address */
+   VG_(cli_free) ( p_old );
 
    return p_new;
 }
 
 SizeT PG_(malloc_usable_size) (ThreadId tid, void* addr)
 {
-  PG_DataObj *obj = dataobj_get_node((Addr)addr);
-  return (obj->size);
+  PG_DataObj * addr_node = PG_(dataobj_get_node)( (Addr) addr );
+  return (addr_node->size);
 }
                                    

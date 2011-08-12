@@ -25,16 +25,20 @@ static Bool clo_trace_mem       = True;
 static Bool clo_trace_calls     = True;
 
 static VgHashTable func_ht;
-static VgHashTable addr_ht;
+static VgHashTable live_ht;
+static PG_PageRange   freed_objs;
 
 static int curr_func_id = UNKNOWN_FUNC_ID;
+
+/* Assume 4 KB pages */
+#define PAGE_SIZE 4096
+#define PAGE_MASK (~0xFFF)
 
 static Bool pg_process_cmd_line_option(Char* arg)
 {
    if VG_BOOL_CLO(arg, "--trace-mem", clo_trace_mem) {}
    else if VG_BOOL_CLO(arg, "--trace-calls", clo_trace_calls) {}
-   else
-      return False;
+   else return False;
    
    tl_assert(clo_trace_mem || clo_trace_calls);
    return True;
@@ -58,7 +62,7 @@ static void pg_print_debug_usage(void)
 static void pg_post_clo_init(void)
 {
    func_ht = VG_(HT_construct) ( "func_hash" );
-   addr_ht = VG_(HT_construct) ( "data_addr_hash" );
+   live_ht = VG_(HT_construct) ( "data_addr_hash" );
 
    /* Add a node for unknown functions */
    PG_Func *func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
@@ -75,6 +79,131 @@ static void pg_post_clo_init(void)
 /*------------------------------------------------------------*/
 /*--- Stuff for --trace-mem                                ---*/
 /*------------------------------------------------------------*/
+
+static void insertNode( PG_PageRange* page_node, PG_DataObj * insert_node ) 
+{
+  PG_DataObj *curr, *prev;
+  insert_node->prev = NULL;
+  insert_node->next = NULL;
+  /* TODO: replace this with a binary search */
+  curr = page_node->first;
+  prev = NULL;
+  for (;;) {
+    if (curr == NULL || curr->addr >= insert_node->addr) {
+      if (curr == page_node->first) {
+	/* insert at front */
+	insert_node->next = page_node->first;
+	page_node->first = insert_node;
+	break;
+      } else if (curr == NULL) {
+	/* insert at the end */
+	tl_assert(prev != NULL); // should have been inserted at the front
+	prev->next = insert_node;
+	insert_node->prev = prev;
+	break;
+      } else {
+	/* insert inbetween prev and curr */
+	insert_node->prev = prev;
+	insert_node->next = curr;
+	curr->prev = insert_node;
+	prev->next = insert_node;
+	break;
+      }
+    }
+    prev = curr;
+    curr = curr->next;
+  }
+}
+
+static void removeNode ( PG_PageRange* page_node, PG_DataObj * addr_node ) 
+{
+  if (addr_node == page_node->first) {
+    page_node->first = addr_node->next;
+  } else if (addr_node->prev != NULL) {
+    addr_node->prev->next = addr_node->next;
+  }
+  if (addr_node->next != NULL) {
+    addr_node->next->prev = addr_node->prev;
+  }
+  addr_node->next = NULL;
+  addr_node->prev = NULL;
+}
+
+static PG_DataObj * getNode ( PG_PageRange* page_node, Addr addr ) 
+{
+  PG_DataObj * ret = NULL;
+  /* TODO: replace this with a binary search */
+  ret = page_node->first;
+  while(ret != NULL) {
+    if (addr >= ret->addr && addr < (ret->addr + ret->size)) {
+      return ret;
+    }
+    ret = ret->next;
+  }
+  return ret;
+}
+
+void PG_(dataobj_node_malloced)( Addr addr, SizeT size )
+{
+  PG_PageRange* page_node = NULL;
+  PG_DataObj *  addr_node = NULL;
+  /* Lookup page list */
+  Addr page_addr = addr & PAGE_MASK;
+  do {
+    /* create address node */
+    addr_node = VG_(malloc) ("trace_load.addr_node", sizeof(PG_DataObj) );
+    memset(addr_node, 0, sizeof(PG_DataObj));
+    addr_node->addr = addr;
+    addr_node->size = size;
+    addr_node->access_ht = VG_(HT_construct) ( "access_hash" );
+    
+    page_node = VG_(HT_lookup) ( live_ht, page_addr );
+    if (!page_node) {
+      page_node = VG_(malloc) ("trace_load.page_node", sizeof(PG_PageRange) );
+      memset(page_node, 0, sizeof(PG_PageRange));
+      page_node->page_addr = page_addr;
+      VG_(HT_add_node) (live_ht, page_node);
+    }
+    /* Insert node into list */
+    insertNode( page_node, addr_node );
+    
+    page_addr += PAGE_SIZE;
+  } while (page_addr < addr + size);
+}
+
+void PG_(dataobj_node_freed)( Addr addr )
+{
+  PG_PageRange* page_node = NULL;
+  PG_DataObj *  addr_node = NULL;
+  /* Lookup page list */
+  Addr page_addr = addr & PAGE_MASK;
+
+  do {
+    page_node = VG_(HT_lookup) ( live_ht, page_addr );
+    if (page_node == NULL) return;
+    addr_node = getNode(page_node, addr);
+    if (addr_node == NULL) return;
+    /* Remove node from list */
+    removeNode( page_node, addr_node );
+    /* Save in freed_objs for later output */
+    insertNode( &freed_objs, addr_node);
+
+    page_addr += PAGE_SIZE;
+  } while (page_addr < addr + addr_node->size);
+}
+
+PG_DataObj * PG_(dataobj_get_node)( Addr addr )
+{
+  /* Lookup page list */
+  Addr page_addr = addr & PAGE_MASK;
+
+  PG_PageRange* page_node = VG_(HT_lookup) ( live_ht, page_addr );
+  if (page_node) {
+    return (getNode(page_node, addr));
+  } else {
+    return NULL;
+  }
+}
 
 #define MAX_DSIZE    512
 
@@ -100,6 +229,7 @@ typedef
    Beyond that, larger numbers just potentially induce more spilling due to
    extending live ranges of address temporaries. */
 #define N_EVENTS 4
+
 
 /* Maintain an ordered list of memory events which are outstanding, in
    the sense that no IR has yet been generated to do the relevant
@@ -133,23 +263,20 @@ static Int events_used = 0;
 static void update_access(Addr addr, UWord func_id,  SizeT bytes_read, 
 			  SizeT bytes_written)
 {
-  PG_Addr* addr_node = VG_(HT_lookup) ( addr_ht, addr );
-  if (addr_node == NULL) {
-    addr_node = VG_(malloc) ("trace_load.addr_node", sizeof(PG_Addr) );
-    addr_node->addr = addr;
-    addr_node->access_ht = VG_(HT_construct) ( "access_hash" );
-    VG_(HT_add_node) (addr_ht, addr_node);
+  /* look up address in malloced list */
+  PG_DataObj * addr_node = PG_(dataobj_get_node)( addr );
+  if (addr_node != NULL) {
+    PG_Access* access_node = VG_(HT_lookup) ( addr_node->access_ht, func_id );
+    if (access_node == NULL) {
+      access_node = VG_(malloc) ("trace_load.access_node", sizeof(PG_Access) );
+      access_node->func_id = func_id;
+      access_node->bytes_read = 0;
+      access_node->bytes_written = 0;
+      VG_(HT_add_node) (addr_node->access_ht, access_node);
+    }
+    access_node->bytes_read += bytes_read;
+    access_node->bytes_written += bytes_written;
   }
-  PG_Access* access_node = VG_(HT_lookup) ( addr_node->access_ht, func_id );
-  if (access_node == NULL) {
-    access_node = VG_(malloc) ("trace_load.access_node", sizeof(PG_Access) );
-    access_node->func_id = func_id;
-    access_node->bytes_read = 0;
-    access_node->bytes_written = 0;
-    VG_(HT_add_node) (addr_node->access_ht, access_node);
-  }
-  access_node->bytes_read += bytes_read;
-  access_node->bytes_written += bytes_written;
 }
 
 static VG_REGPARM(3) void trace_load(Addr addr, SizeT size, UWord func_id)
@@ -284,6 +411,41 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize, UWord func_id )
 }
 
 static
+UWord get_func_id( IRSB* sbIn, Int offset )
+{
+  UWord func_id;
+  Char fnname[FN_LENGTH];
+  tl_assert(sbIn->stmts[offset]->tag == Ist_IMark);
+  Bool found_fn = VG_(get_fnname)(sbIn->stmts[offset]->Ist.IMark.addr,
+				  fnname, FN_LENGTH);
+  if (!found_fn) {
+    func_id = UNKNOWN_FUNC_ID;
+  } else {
+    UWord key = hash_sdbm(fnname);
+    PG_Func * func = VG_(HT_lookup) ( func_ht, key );
+    if (func == NULL) {
+      UInt linenum;
+      Bool dirname_available;
+      func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
+      func->key = key;
+      func->id = curr_func_id++;
+      func->fnname = VG_(malloc) ("func_ht.node.fnname", strlen(fnname));
+      func->filename = VG_(malloc)("func_ht.node.filename", FILENAME_LENGTH);
+      func->dirname  = VG_(malloc)("func_ht.node.dirname", DIRNAME_LENGTH);
+      memcpy(func->fnname, fnname, strlen(fnname));
+      VG_(get_filename_linenum) ( sbIn->stmts[offset]->Ist.IMark.addr, 
+				  func->filename, FILENAME_LENGTH,
+				  func->dirname,  DIRNAME_LENGTH,
+				  &dirname_available,
+				  &linenum );
+      VG_(HT_add_node) ( func_ht, func );
+    }
+    func_id = func->id;
+  }
+  return func_id;
+}
+
+static
 IRSB* pg_instrument ( VgCallbackClosure* closure,
                       IRSB* sbIn, 
                       VexGuestLayout* layout, 
@@ -315,34 +477,7 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
    }
    
    if (i < sbIn->stmts_used) {
-     Char fnname[FN_LENGTH];
-     tl_assert(sbIn->stmts[i]->tag == Ist_IMark);
-     Bool found_fn = VG_(get_fnname)(sbIn->stmts[i]->Ist.IMark.addr,
-				     fnname, FN_LENGTH);
-     if (!found_fn) {
-       func_id = UNKNOWN_FUNC_ID;
-     } else {
-       UWord key = hash_sdbm(fnname);
-       PG_Func * func = VG_(HT_lookup) ( func_ht, key );
-       if (func == NULL) {
-	 UInt linenum;
-	 Bool dirname_available;
-	 func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
-	 func->key = key;
-	 func->id = curr_func_id++;
-	 func->fnname = VG_(malloc) ("func_ht.node.fnname", strlen(fnname));
-	 func->filename = VG_(malloc)("func_ht.node.filename", FILENAME_LENGTH);
-	 func->dirname  = VG_(malloc)("func_ht.node.dirname", DIRNAME_LENGTH);
-	 memcpy(func->fnname, fnname, strlen(fnname));
-	 VG_(get_filename_linenum) ( sbIn->stmts[i]->Ist.IMark.addr, 
-				     func->filename, FILENAME_LENGTH,
-				     func->dirname,  DIRNAME_LENGTH,
-				     &dirname_available,
-				     &linenum );
-	 VG_(HT_add_node) ( func_ht, func );
-       }
-       func_id = func->id;
-     }
+     func_id = get_func_id(sbIn, i);
    }     
 
    for (/*use current i*/; i < sbIn->stmts_used; i++) {
@@ -359,6 +494,8 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
             break;
 
          case Ist_IMark:
+	    /* reset function id if it has changed */
+	    func_id = get_func_id(sbIn, i);
             if (clo_trace_mem) {
                // WARNING: do not remove this function call, even if you
                // aren't interested in instruction reads.  See the comment
@@ -478,9 +615,11 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
 static void pg_fini(Int exitcode)
 {
   PG_Func * func;
-  PG_Addr * addr;
-  PG_Access * access;
+  PG_PageRange * page;
+  PG_DataObj * addr;
+  PG_Access  * access;
 
+  /* Output function details */
   VG_(HT_ResetIter)(func_ht);
   while ( (func = VG_(HT_Next)(func_ht)) ) {
     VG_(printf) ("FUNC: %lu %s (%s%s)\n", func->id, func->fnname,
@@ -491,22 +630,34 @@ static void pg_fini(Int exitcode)
       VG_(free) (func->dirname);
     }
   }
+  /* Scan through live list, adding to freed list */
+  VG_(HT_ResetIter)(live_ht);
+  while ( (page = VG_(HT_Next)(live_ht)) ) {
+    addr = page->first;
+    while ( addr != NULL ) {
+      PG_DataObj * next = addr->next;
+      PG_(dataobj_node_freed)(addr->addr);
+      addr = next;
+    }
+  }
 
-  VG_(HT_ResetIter)(addr_ht);
-  while ( (addr = VG_(HT_Next)(addr_ht)) ) {
+  /* Output data object details */
+  addr = freed_objs.first;
+  while (addr != NULL) {
     if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
       VG_(printf) ("ADDR: 0x%lx\n", addr->addr);
       VG_(HT_ResetIter)(addr->access_ht);
       while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
-	VG_(printf) ("  ACCESS: %lu, %lu, %lu\n", access->func_id, 
+	VG_(printf) (" ACCESS: %lu, %lu, %lu\n", access->func_id,
 		     access->bytes_read, access->bytes_written);
       }
+      VG_(HT_destruct) (addr->access_ht);
     }
-    VG_(HT_destruct) (addr->access_ht);
+    addr = addr->next;
   }
 
   VG_(HT_destruct) (func_ht);
-  VG_(HT_destruct) (addr_ht);
+  VG_(HT_destruct) (live_ht);
   
 }
 
@@ -522,9 +673,22 @@ static void pg_pre_clo_init(void)
    VG_(basic_tool_funcs)        (pg_post_clo_init,
                                  pg_instrument,
                                  pg_fini);
+
    VG_(needs_command_line_options)(pg_process_cmd_line_option,
                                    pg_print_usage,
                                    pg_print_debug_usage);
+
+   VG_(needs_malloc_replacement)  (PG_(malloc),
+                                   PG_(__builtin_new),
+                                   PG_(__builtin_vec_new),
+                                   PG_(memalign),
+                                   PG_(calloc),
+                                   PG_(free),
+                                   PG_(__builtin_delete),
+                                   PG_(__builtin_vec_delete),
+                                   PG_(realloc),
+                                   PG_(malloc_usable_size), 
+                                   PG_MALLOC_REDZONE_SZB );
 }
 
 VG_DETERMINE_INTERFACE_VERSION(pg_pre_clo_init)
