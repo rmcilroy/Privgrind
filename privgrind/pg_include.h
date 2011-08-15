@@ -5,13 +5,37 @@
 #ifndef __PG_INCLUDE__
 #define __PG_INCLUDE__
 
+#include "pub_tool_basics.h"
+#include "pub_tool_tooliface.h"
+#include "pub_tool_libcassert.h"
+#include "pub_tool_libcprint.h"
+#include "pub_tool_debuginfo.h"
+#include "pub_tool_libcbase.h"
+#include "pub_tool_options.h"
+#include "pub_tool_machine.h"
+#include "pub_tool_mallocfree.h"
 #include "pub_tool_hashtable.h"
 #include "valgrind.h"
+
+#define FN_LENGTH   100
+#define FILENAME_LENGTH 100
+#define DIRNAME_LENGTH  512
+#define UNKNOWN_FUNC_ID 0
 
 #define PG_(str)    VGAPPEND(vgPrivGrind_,str)
 
 /* This is set the same as memcheck, but might not need be as large */
 #define PG_MALLOC_REDZONE_SZB    16
+
+/* This describes a function. Nb: first two fields must match core's
+ * VgHashNode. */
+typedef 
+    struct _PG_Calls {
+       struct _PG_Calls * next;
+       UWord              target_id;
+       UWord              count;
+    }
+    PG_Calls;
 
 /* This describes a function. Nb: first two fields must match core's
  * VgHashNode. */
@@ -23,6 +47,7 @@ typedef
       Char *            filename;
       Char *            dirname;
       UWord             id;
+      VgHashTable       calls_ht;
    }
    PG_Func;
 
@@ -83,5 +108,11 @@ void PG_(__builtin_delete) (ThreadId tid, void* addr);
 void PG_(__builtin_vec_delete) (ThreadId tid, void* addr);
 void* PG_(realloc) (ThreadId tid, void* addr, SizeT new_size);
 SizeT PG_(malloc_usable_size) (ThreadId tid, void* addr);
+
+/* pg_util.c */
+void initUnknownFunc(VgHashTable func_ht);
+UWord getFuncId( Addr addr, VgHashTable func_ht);
+Addr irConstToAddr(IRConst * con);
+PG_Func * getFunc(UWord func_id);
 
 #endif

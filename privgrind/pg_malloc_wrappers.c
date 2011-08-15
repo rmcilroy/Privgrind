@@ -2,17 +2,8 @@
 /*--- Privgrind: The Priv-seperation Valgrind tool.  pg_malloc_wrappers.c ---*/
 /*--------------------------------------------------------------------*/
 
-#include "pub_tool_basics.h"
-#include "pub_tool_redir.h"
-#include "pub_tool_mallocfree.h"
-#include "pub_tool_replacemalloc.h" 
-#include "pub_tool_execontext.h"
-#include "pub_tool_libcbase.h"
-#include "pub_tool_libcassert.h"
-#include "pub_tool_libcprint.h"
-#include "assert.h"
-
 #include "pg_include.h"
+#include "assert.h"
 
 #define DEFAULT_ALIGN 16
 

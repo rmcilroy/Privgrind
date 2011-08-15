@@ -11,7 +11,7 @@ if VGCONF_HAVE_PLATFORM_SEC
 noinst_PROGRAMS += privgrind-@VGCONF_ARCH_SEC@-@VGCONF_OS@
 endif
 
-PRIVGRIND_SOURCES_COMMON = pg_main.c pg_malloc_wrappers.c
+PRIVGRIND_SOURCES_COMMON = pg_main.c pg_util.c pg_malloc_wrappers.c
 
 privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_SOURCES      = \
 	$(PRIVGRIND_SOURCES_COMMON)
@@ -67,7 +67,7 @@ if VGCONF_OS_IS_DARWIN
 noinst_DSYMS = $(noinst_PROGRAMS)
 endif
 
-VGPRELOAD_PRIVGRIND_SOURCES_COMMON = pg_main.c pg_malloc_wrappers.c 
+VGPRELOAD_PRIVGRIND_SOURCES_COMMON = $(PRIVGRIND_SOURCES_COMMON)
 
 vgpreload_privgrind_@VGCONF_ARCH_PRI@_@VGCONF_OS@_so_SOURCES      = \
 	$(VGPRELOAD_PRIVGRIND_SOURCES_COMMON)

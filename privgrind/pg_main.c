@@ -3,23 +3,9 @@
 /*--- Privgrind: The Priv-seperation Valgrind tool.      pg_main.c ---*/
 /*--------------------------------------------------------------------*/
 
-#include "pub_tool_basics.h"
-#include "pub_tool_tooliface.h"
-#include "pub_tool_libcassert.h"
-#include "pub_tool_libcprint.h"
-#include "pub_tool_debuginfo.h"
-#include "pub_tool_libcbase.h"
-#include "pub_tool_options.h"
-#include "pub_tool_machine.h"
-#include "pub_tool_mallocfree.h"
 #include <string.h>
 
 #include "pg_include.h"
-
-#define FN_LENGTH   100
-#define FILENAME_LENGTH 100
-#define DIRNAME_LENGTH  512
-#define UNKNOWN_FUNC_ID 0
 
 static Bool clo_trace_mem       = True;
 static Bool clo_trace_calls     = True;
@@ -27,8 +13,6 @@ static Bool clo_trace_calls     = True;
 static VgHashTable func_ht;
 static VgHashTable live_ht;
 static PG_PageRange   freed_objs;
-
-static int curr_func_id = UNKNOWN_FUNC_ID;
 
 /* Assume 4 KB pages */
 #define PAGE_SIZE 4096
@@ -65,14 +49,7 @@ static void pg_post_clo_init(void)
    live_ht = VG_(HT_construct) ( "data_addr_hash" );
 
    /* Add a node for unknown functions */
-   PG_Func *func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
-   func->fnname = "<Unknown>";
-   func->filename = "";
-   func->dirname = "";
-   func->key = hash_sdbm(func->fnname);
-   func->id = curr_func_id++;
-   tl_assert(func->id == UNKNOWN_FUNC_ID);
-   VG_(HT_add_node) ( func_ht, func );
+   initUnknownFunc(func_ht);
 }
 
 
@@ -300,6 +277,44 @@ static VG_REGPARM(3) void trace_modify(Addr addr, SizeT size, UWord func_id)
   }
 }
 
+static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
+{
+  PG_Func *caller_func; 
+  PG_Calls *target;
+
+  caller_func = getFunc(caller_func_id);
+  tl_assert(caller_func != NULL);
+  target = VG_(HT_lookup) ( caller_func->calls_ht, target_func_id );
+  if (target == NULL) {
+    target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
+    target->target_id = target_func_id;
+    target->count = 0;
+    VG_(HT_add_node) ( caller_func->calls_ht, target );
+  }
+  target->count++;
+}
+
+static VG_REGPARM(2) void trace_call_indirect(UWord caller_func_id, 
+					      Addr target_addr)
+{
+  PG_Func *caller_func; 
+  PG_Calls *target;
+  UWord target_func_id;
+  
+  caller_func = getFunc(caller_func_id);
+  tl_assert(caller_func != NULL);
+  target_func_id = getFuncId(target_addr, func_ht);
+
+  target = VG_(HT_lookup) ( caller_func->calls_ht, target_func_id );
+  if (target == NULL) {
+    target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
+    target->target_id = target_func_id;
+    target->count = 0;
+    VG_(HT_add_node) ( caller_func->calls_ht, target );
+  }
+  target->count++;
+}
+
 static void flushEvents(IRSB* sb)
 {
    Int        i;
@@ -411,38 +426,43 @@ void addEvent_Dw ( IRSB* sb, IRAtom* daddr, Int dsize, UWord func_id )
 }
 
 static
-UWord get_func_id( IRSB* sbIn, Int offset )
+void addEvent_Call ( IRSB* sb, UWord func_id, UWord target_func_id )
 {
-  UWord func_id;
-  Char fnname[FN_LENGTH];
-  tl_assert(sbIn->stmts[offset]->tag == Ist_IMark);
-  Bool found_fn = VG_(get_fnname)(sbIn->stmts[offset]->Ist.IMark.addr,
-				  fnname, FN_LENGTH);
-  if (!found_fn) {
-    func_id = UNKNOWN_FUNC_ID;
-  } else {
-    UWord key = hash_sdbm(fnname);
-    PG_Func * func = VG_(HT_lookup) ( func_ht, key );
-    if (func == NULL) {
-      UInt linenum;
-      Bool dirname_available;
-      func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
-      func->key = key;
-      func->id = curr_func_id++;
-      func->fnname = VG_(malloc) ("func_ht.node.fnname", strlen(fnname));
-      func->filename = VG_(malloc)("func_ht.node.filename", FILENAME_LENGTH);
-      func->dirname  = VG_(malloc)("func_ht.node.dirname", DIRNAME_LENGTH);
-      memcpy(func->fnname, fnname, strlen(fnname));
-      VG_(get_filename_linenum) ( sbIn->stmts[offset]->Ist.IMark.addr, 
-				  func->filename, FILENAME_LENGTH,
-				  func->dirname,  DIRNAME_LENGTH,
-				  &dirname_available,
-				  &linenum );
-      VG_(HT_add_node) ( func_ht, func );
-    }
-    func_id = func->id;
-  }
-  return func_id;
+  Char*      helperName;
+  void*      helperAddr;
+  IRExpr**   argv;
+  IRDirty*   di;
+
+  helperName = "trace_call";
+  helperAddr =  trace_call;
+
+  // Add the helper.
+  argv = mkIRExprVec_2( mkIRExpr_HWord( func_id ), 
+			mkIRExpr_HWord( target_func_id ) );
+  di   = unsafeIRDirty_0_N( /*regparms*/2, 
+			    helperName, VG_(fnptr_to_fnentry)( helperAddr ),
+			    argv );
+  addStmtToIRSB( sb, IRStmt_Dirty(di) );
+}
+
+static
+void addEvent_Call_Indirect ( IRSB *sb, UWord func_id, IRExpr *target_addr )
+{
+  Char*      helperName;
+  void*      helperAddr;
+  IRExpr**   argv;
+  IRDirty*   di;
+
+  helperName = "trace_call_indirect";
+  helperAddr =  trace_call_indirect;
+
+  // Add the helper.
+  argv = mkIRExprVec_2( mkIRExpr_HWord( func_id ), 
+			target_addr );
+  di   = unsafeIRDirty_0_N( /*regparms*/2, 
+			    helperName, VG_(fnptr_to_fnentry)( helperAddr ),
+			    argv );
+  addStmtToIRSB( sb, IRStmt_Dirty(di) );
 }
 
 static
@@ -477,7 +497,7 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
    }
    
    if (i < sbIn->stmts_used) {
-     func_id = get_func_id(sbIn, i);
+     func_id = getFuncId(sbIn->stmts[i]->Ist.IMark.addr, func_ht);
    }     
 
    for (/*use current i*/; i < sbIn->stmts_used; i++) {
@@ -494,18 +514,29 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
             break;
 
          case Ist_IMark:
-	    /* reset function id if it has changed */
-	    func_id = get_func_id(sbIn, i);
-            if (clo_trace_mem) {
+	   {
+	     /* reset function id if it has changed */
+	     Int new_func_id = getFuncId(sbIn->stmts[i]->Ist.IMark.addr, func_ht);
+	     if (new_func_id != func_id) {
+	       /* changed functions midway through a block */
+	       if (clo_trace_calls) {
+		 addEvent_Call( sbOut, func_id, new_func_id);
+	       }
+	       if (clo_trace_mem) {
+		 flushEvents(sbOut);
+	       }
+	       func_id = new_func_id;
+	     }
+	     if (clo_trace_mem) {
                // WARNING: do not remove this function call, even if you
                // aren't interested in instruction reads.  See the comment
                // above the function itself for more detail.
                addEvent_Ir( sbOut, mkIRExpr_HWord( (HWord)st->Ist.IMark.addr ),
                             st->Ist.IMark.len, func_id );
-            }
-            addStmtToIRSB( sbOut, st );
-            break;
-
+	     }
+	     addStmtToIRSB( sbOut, st );
+	     break;
+	   }
          case Ist_WrTmp:
             if (clo_trace_mem) {
                IRExpr* data = st->Ist.WrTmp.data;
@@ -591,29 +622,65 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
          }
 
          case Ist_Exit:
-            if (clo_trace_mem) {
-               flushEvents(sbOut);
-            }
 
-            addStmtToIRSB( sbOut, st );
-
-            break;
+	   if (clo_trace_calls) {
+	     if (st->Ist.Exit.jk == Ijk_Call || st->Ist.Exit.jk ==  Ijk_Boring) {
+	       Addr target = irConstToAddr(st->Ist.Exit.dst);
+	       UWord target_fid = getFuncId(target, func_ht);
+	       if (target_fid != func_id) {
+		 addEvent_Call( sbOut, func_id, target_fid);
+	       }
+	     }
+	   }
+	   if (clo_trace_mem) {
+	     flushEvents(sbOut);
+	   }
+	   
+	   addStmtToIRSB( sbOut, st );
+	   
+	   break;
 
          default:
             tl_assert(0);
       }
    }
 
+   if (clo_trace_calls) {
+     if (sbIn->jumpkind == Ijk_Call || sbIn->jumpkind == Ijk_Boring) {
+       switch (sbIn->next->tag) {
+       case Iex_Const:
+	 {
+	   Addr target = irConstToAddr(sbIn->next->Iex.Const.con);
+	   UWord target_fid = getFuncId(target, func_ht);
+	   if (target_fid != func_id) {
+	     addEvent_Call( sbOut, func_id, target_fid);
+	   }
+	   break;
+	 }
+       case Iex_RdTmp:
+	 /* looks like an indirect branch (branch to unknown) */
+	 addEvent_Call_Indirect( sbOut, func_id, sbIn->next );
+	 break;
+       default:
+	 /* shouldn't happen - if the incoming IR is properly
+	    flattened, should only have tmp and const cases to
+	    consider. */
+	 tl_assert(0);
+       }
+     }
+   }
    if (clo_trace_mem) {
       /* At the end of the sbIn.  Flush outstandings. */
       flushEvents(sbOut);
    }
+
 
    return sbOut;
 }
 
 static void pg_fini(Int exitcode)
 {
+  PG_Calls * call;
   PG_Func * func;
   PG_PageRange * page;
   PG_DataObj * addr;
@@ -624,36 +691,45 @@ static void pg_fini(Int exitcode)
   while ( (func = VG_(HT_Next)(func_ht)) ) {
     VG_(printf) ("FUNC: %lu %s (%s%s)\n", func->id, func->fnname,
 		 func->dirname, func->filename);
+    if (clo_trace_calls) {
+      VG_(HT_ResetIter)(func->calls_ht);
+      while ( (call = VG_(HT_Next)(func->calls_ht)) ) {
+	VG_(printf) ("  CALL: %lu, %lu \n", call->target_id, call->count);
+      }
+    }
     if (func->id != UNKNOWN_FUNC_ID) { 
       VG_(free) (func->fnname);
       VG_(free) (func->filename);
       VG_(free) (func->dirname);
     }
   }
-  /* Scan through live list, adding to freed list */
-  VG_(HT_ResetIter)(live_ht);
-  while ( (page = VG_(HT_Next)(live_ht)) ) {
-    addr = page->first;
-    while ( addr != NULL ) {
-      PG_DataObj * next = addr->next;
-      PG_(dataobj_node_freed)(addr->addr);
-      addr = next;
-    }
-  }
 
-  /* Output data object details */
-  addr = freed_objs.first;
-  while (addr != NULL) {
-    if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
-      VG_(printf) ("ADDR: 0x%lx\n", addr->addr);
-      VG_(HT_ResetIter)(addr->access_ht);
-      while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
-	VG_(printf) (" ACCESS: %lu, %lu, %lu\n", access->func_id,
-		     access->bytes_read, access->bytes_written);
+  if (clo_trace_mem) {
+    /* Scan through live list, adding to freed list */
+    VG_(HT_ResetIter)(live_ht);
+    while ( (page = VG_(HT_Next)(live_ht)) ) {
+      addr = page->first;
+      while ( addr != NULL ) {
+	PG_DataObj * next = addr->next;
+	PG_(dataobj_node_freed)(addr->addr);
+	addr = next;
       }
-      VG_(HT_destruct) (addr->access_ht);
     }
-    addr = addr->next;
+
+    /* Output data object details */
+    addr = freed_objs.first;
+    while (addr != NULL) {
+      if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
+	VG_(printf) ("ADDR: 0x%lx\n", addr->addr);
+	VG_(HT_ResetIter)(addr->access_ht);
+	while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
+	  VG_(printf) ("  ACCESS: %lu, %lu, %lu\n", access->func_id,
+		       access->bytes_read, access->bytes_written);
+	}
+	VG_(HT_destruct) (addr->access_ht);
+      }
+      addr = addr->next;
+    }
   }
 
   VG_(HT_destruct) (func_ht);
