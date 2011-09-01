@@ -1301,6 +1301,22 @@ Bool get_sym_name ( Bool do_cxx_demangling, Bool do_z_demangling,
    return True;
 }
 
+
+Bool VG_(get_global_obj) ( Addr a, /*OUT*/Addr *start, /*Out*/Word *size )
+{
+   DebugInfo* di;
+   Word       sno;
+
+   search_all_symtabs ( a, &di, &sno, True, False );
+   if (di == NULL) 
+      return False;
+
+   *start = di->symtab[sno].addr;
+   *size  = di->symtab[sno].size;
+
+   return True;
+}
+
 /* ppc64-linux only: find the TOC pointer (R2 value) that should be in
    force at the entry point address of the function containing
    guest_code_addr.  Returns 0 if not known. */

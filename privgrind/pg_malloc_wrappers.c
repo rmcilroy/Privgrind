@@ -3,6 +3,7 @@
 /*--------------------------------------------------------------------*/
 
 #include "pg_include.h"
+#include "pub_tool_replacemalloc.h"
 #include "assert.h"
 
 #define DEFAULT_ALIGN 16
@@ -102,7 +103,7 @@ void* PG_(realloc) (ThreadId tid, void* addr, SizeT new_szB)
      VG_(cli_free) ( p_old );
 
      /* update data access node */
-     obj->addr = p_new;
+     obj->addr = (Addr)p_new;
      obj->size = new_szB;
    } else {
      /* remove old address from live database */

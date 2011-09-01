@@ -114,6 +114,9 @@ Bool VG_(get_data_description)(
         Addr data_addr
      );
 
+/* Search for address in global symbols, and output start and size of object */
+Bool VG_(get_global_obj) ( Addr a, /*OUT*/Addr *start, /*Out*/Word *size );
+
 /* Succeeds if the address is within a shared object or the main executable.
    It doesn't matter if debug info is present or not. */
 extern Bool VG_(get_objname)  ( Addr a, Char* objname, Int n_objname );

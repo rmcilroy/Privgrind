@@ -11,6 +11,8 @@
 
 #include <string.h>
 #include "pg_include.h"
+#include "pub_tool_xarray.h"    
+#include "pub_tool_debuginfo.h"    
 
 static Char* clo_privgrind_out_file = "privgrind.out.%p";
 static Char* clo_boundary_fun = 0;
@@ -132,7 +134,7 @@ static PG_DataObj * getNode ( PG_PageRange* page_node, Addr addr )
   return ret;
 }
 
-void PG_(dataobj_node_malloced)( Addr addr, SizeT size )
+PG_DataObj * PG_(dataobj_node_malloced)( Addr addr, SizeT size )
 {
   PG_PageRange* page_node = NULL;
   PG_DataObj *  addr_node = NULL;
@@ -158,6 +160,7 @@ void PG_(dataobj_node_malloced)( Addr addr, SizeT size )
     
     page_addr += PAGE_SIZE;
   } while (page_addr < addr + size);
+  return addr_node;
 }
 
 void PG_(dataobj_node_freed)( Addr addr )
@@ -252,8 +255,19 @@ static Int events_used = 0;
 static void update_access(Addr addr, UWord func_id,  SizeT bytes_read, 
 			  SizeT bytes_written)
 {
+  int i;
   /* look up address in malloced list */
   PG_DataObj * addr_node = PG_(dataobj_get_node)( addr );
+  if (addr_node == NULL) {
+    /* Check if it is a global that we have not yet added to our list */
+    Addr glob_start;
+    Word glob_size;
+    if (VG_(get_global_obj) ( addr, &glob_start, &glob_size )) {
+      /* Treat this global as having been malloced to add it to the list
+	 of addresses traced */
+      addr_node = PG_(dataobj_node_malloced)( glob_start, glob_size );
+    }
+  }
   if (addr_node != NULL) {
     PG_Access* access_node = VG_(HT_lookup) ( addr_node->access_ht, func_id );
     if (access_node == NULL) {
@@ -266,6 +280,7 @@ static void update_access(Addr addr, UWord func_id,  SizeT bytes_read,
     access_node->bytes_read += bytes_read;
     access_node->bytes_written += bytes_written;
   }
+
 }
 
 static VG_REGPARM(3) void trace_load(Addr addr, SizeT size, UWord func_id)
