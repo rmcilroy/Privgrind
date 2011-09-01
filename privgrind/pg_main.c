@@ -385,12 +385,12 @@ static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
 
   caller_func = getFunc(caller_func_id);
   tl_assert(caller_func != NULL);
-  target = VG_(HT_lookup) ( caller_func->calls_ht, target_func_id );
+  target = VG_(HT_lookup) ( caller_func->call_history->calls_ht, target_func_id );
   if (target == NULL) {
     target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     target->target_id = target_func_id;
     target->count = 0;
-    VG_(HT_add_node) ( caller_func->calls_ht, target );
+    VG_(HT_add_node) ( caller_func->call_history->calls_ht, target );
   }
   target->count++;
   
@@ -415,12 +415,12 @@ static VG_REGPARM(2) void trace_call_indirect(UWord caller_func_id,
   tl_assert(caller_func != NULL);
   target_func_id = getFuncId(target_addr, func_ht);
 
-  target = VG_(HT_lookup) ( caller_func->calls_ht, target_func_id );
+  target = VG_(HT_lookup) ( caller_func->call_history->calls_ht, target_func_id );
   if (target == NULL) {
     target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     target->target_id = target_func_id;
     target->count = 0;
-    VG_(HT_add_node) ( caller_func->calls_ht, target );
+    VG_(HT_add_node) ( caller_func->call_history->calls_ht, target );
   }
   target->count++;
 }
@@ -801,8 +801,8 @@ static void pg_out_fun (void)
     VG_(printf) ("FUNC: %lu %s (%s%s)\n", func->id, func->fnname,
 		 func->dirname, func->filename);
     if (clo_trace_calls) {
-      VG_(HT_ResetIter)(func->calls_ht);
-      while ( (call = VG_(HT_Next)(func->calls_ht)) ) {
+      VG_(HT_ResetIter)(func->call_history->calls_ht);
+      while ( (call = VG_(HT_Next)(func->call_history->calls_ht)) ) {
 	VG_(printf) ("  CALL: %lu, %lu \n", call->target_id, call->count);
       }
     }
