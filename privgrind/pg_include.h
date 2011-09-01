@@ -93,7 +93,7 @@ static inline UWord hash_sdbm(Char *str)
 }
 
 /* pg_main.c */
-void PG_(dataobj_node_malloced)( Addr addr, SizeT size );
+PG_DataObj * PG_(dataobj_node_malloced)( Addr addr, SizeT size );
 void PG_(dataobj_node_freed)( Addr addr );
 PG_DataObj * PG_(dataobj_get_node)( Addr addr );
 
