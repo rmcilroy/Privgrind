@@ -3,14 +3,22 @@
 /*--- Privgrind: The Priv-seperation Valgrind tool.      pg_main.c ---*/
 /*--------------------------------------------------------------------*/
 
-#include <string.h>
 
+#include "pub_tool_basics.h"
+#include "pub_tool_vki.h"
+#include "pub_tool_libcfile.h"
+#include "pub_tool_libcprint.h"
+
+#include <string.h>
 #include "pg_include.h"
 #include "pub_tool_xarray.h"    
 #include "pub_tool_debuginfo.h"    
 
+static Char* clo_privgrind_out_file = "privgrind.out.%p";
+static Char* clo_boundary_fun = 0;
 static Bool clo_trace_mem       = True;
 static Bool clo_trace_calls     = True;
+
 
 static VgHashTable func_ht;
 static VgHashTable live_ht;
@@ -22,8 +30,10 @@ static PG_PageRange   freed_objs;
 
 static Bool pg_process_cmd_line_option(Char* arg)
 {
-   if VG_BOOL_CLO(arg, "--trace-mem", clo_trace_mem) {}
+   if 	   VG_BOOL_CLO(arg, "--trace-mem", clo_trace_mem) {}
    else if VG_BOOL_CLO(arg, "--trace-calls", clo_trace_calls) {}
+   else if VG_STR_CLO( arg, "--boundary-function", clo_boundary_fun) {}
+   else if VG_STR_CLO( arg, "--privgrind-out-file", clo_privgrind_out_file) {}
    else return False;
    
    tl_assert(clo_trace_mem || clo_trace_calls);
@@ -33,8 +43,10 @@ static Bool pg_process_cmd_line_option(Char* arg)
 static void pg_print_usage(void)
 {  
    VG_(printf)(
-"    --trace-mem=no|yes    trace all memory accesses by function [yes]\n"
-"    --trace-calls=no|yes  trace all calls made by the calling function [yes]\n"
+"    --privgrind-out-file=<f>  Output file name [privgrind.out.%%p]\n"
+"    --boundary-function=<f>   Dump information when entering boundary function\n"
+"    --trace-mem=no|yes        Trace all memory accesses by function [yes]\n"
+"    --trace-calls=no|yes      Trace all calls made by the calling function [yes]\n"
    );
 }
 
@@ -292,6 +304,95 @@ static VG_REGPARM(3) void trace_modify(Addr addr, SizeT size, UWord func_id)
   }
 }
 
+
+/* Output data object details */
+static void pg_out_obj (PG_PageRange * page, PG_DataObj * addr)
+{
+  PG_Access  * access;
+  
+	addr = freed_objs.first;
+	while (addr != NULL) {
+	  if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
+	VG_(printf) ("ADDR: 0x%lx\n", addr->addr);
+	VG_(HT_ResetIter)(addr->access_ht);
+	while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
+	  VG_(printf) ("  ACCESS: %lu, %lu, %lu\n", access->func_id,
+			   access->bytes_read, access->bytes_written);
+	}
+	VG_(HT_destruct) (addr->access_ht);
+	  }
+	  addr = addr->next;
+	}
+}
+
+
+static void dump_info()
+{
+	
+	Int     fd;
+	SysRes  sres;
+	Char    buf[512];
+   
+	PG_PageRange * page;
+	PG_DataObj * addr;
+	PG_Access  * access;
+
+   // Setup output filename.  Nb: it's important to do this now, ie. as late
+   // as possible.  If we do it at start-up and the program forks and the
+   // output file format string contains a %p (pid) specifier, both the
+   // parent and child will incorrectly write to the same file;  this
+   // happened in 3.3.0.
+   Char* privgrind_out_file =
+      VG_(expand_file_name)("--privgrind-out-file", clo_privgrind_out_file);
+
+   sres = VG_(open)(privgrind_out_file, VKI_O_CREAT|VKI_O_TRUNC|VKI_O_WRONLY,
+                                         VKI_S_IRUSR|VKI_S_IWUSR);
+   if (sr_isError(sres)) {
+      // If the file can't be opened for whatever reason (conflict
+      // between multiple privgrinded processes?), give up now.
+      VG_(umsg)("error: can't open Privgrind output file '%s'\n",
+                privgrind_out_file );
+      VG_(umsg)("       ... so output will be missing.\n");
+      VG_(free)(privgrind_out_file);
+      return;
+   } else {
+      fd = sr_Res(sres);
+      VG_(free)(privgrind_out_file);
+   }
+   
+	/* Scan through pages from live_ht */
+	VG_(HT_ResetIter)(live_ht);
+	while ( (page = VG_(HT_Next)(live_ht)) ) {
+	  
+		/* Scan through addresses */
+		addr = page->first;
+		while ( addr != NULL ) {
+		
+			if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
+
+				VG_(sprintf) (buf, "ADDR: 0x%lx\n", addr->addr);
+				VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+				
+				VG_(HT_ResetIter)(addr->access_ht);
+
+				/* Scan through accesses */
+				while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
+					VG_(sprintf) (buf, "  ACCESS: %lu, %lu, %lu\n", access->func_id,
+						   access->bytes_read, access->bytes_written);
+					VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+				}
+			
+			}
+		
+			addr = addr->next;
+		}
+	}
+
+   // Close file
+   VG_(close) (fd);
+   	
+}
+
 static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
 {
   PG_Func *caller_func; 
@@ -307,6 +408,15 @@ static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
     VG_(HT_add_node) ( caller_func->calls_ht, target );
   }
   target->count++;
+  
+   // Check for a marker function call
+  if (target_func_id == 27) {
+	  if (clo_trace_mem) {
+		  // Dump info to file
+		  dump_info();
+	  }
+  }
+  
 }
 
 static VG_REGPARM(2) void trace_call_indirect(UWord caller_func_id, 
@@ -458,6 +568,7 @@ void addEvent_Call ( IRSB* sb, UWord func_id, UWord target_func_id )
 			    helperName, VG_(fnptr_to_fnentry)( helperAddr ),
 			    argv );
   addStmtToIRSB( sb, IRStmt_Dirty(di) );
+  
 }
 
 static
@@ -693,15 +804,13 @@ IRSB* pg_instrument ( VgCallbackClosure* closure,
    return sbOut;
 }
 
-static void pg_fini(Int exitcode)
+/* Output function  details */
+static void pg_out_fun (void)
 {
-  PG_Calls * call;
-  PG_Func * func;
-  PG_PageRange * page;
-  PG_DataObj * addr;
-  PG_Access  * access;
 
-  /* Output function details */
+	PG_Func * func;
+	PG_Calls * call;
+	
   VG_(HT_ResetIter)(func_ht);
   while ( (func = VG_(HT_Next)(func_ht)) ) {
     VG_(printf) ("FUNC: %lu %s (%s%s)\n", func->id, func->fnname,
@@ -718,6 +827,16 @@ static void pg_fini(Int exitcode)
       VG_(free) (func->dirname);
     }
   }
+}
+
+
+static void pg_fini(Int exitcode)
+{
+  PG_PageRange * page;
+  PG_DataObj * addr;
+
+  /* Output function details */
+	pg_out_fun();
 
   if (clo_trace_mem) {
     /* Scan through live list, adding to freed list */
@@ -725,26 +844,15 @@ static void pg_fini(Int exitcode)
     while ( (page = VG_(HT_Next)(live_ht)) ) {
       addr = page->first;
       while ( addr != NULL ) {
-	PG_DataObj * next = addr->next;
-	PG_(dataobj_node_freed)(addr->addr);
-	addr = next;
+				PG_DataObj * next = addr->next;
+				PG_(dataobj_node_freed)(addr->addr);
+				addr = next;
       }
     }
-
-    /* Output data object details */
-    addr = freed_objs.first;
-    while (addr != NULL) {
-      if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
-	VG_(printf) ("ADDR: 0x%lx\n", addr->addr);
-	VG_(HT_ResetIter)(addr->access_ht);
-	while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
-	  VG_(printf) ("  ACCESS: %lu, %lu, %lu\n", access->func_id,
-		       access->bytes_read, access->bytes_written);
-	}
-	VG_(HT_destruct) (addr->access_ht);
-      }
-      addr = addr->next;
-    }
+	
+		/* Output data object details */
+		pg_out_obj(page, addr);
+	
   }
 
   VG_(HT_destruct) (func_ht);
