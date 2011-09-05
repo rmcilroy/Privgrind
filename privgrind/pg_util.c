@@ -29,7 +29,7 @@ PG_Func * getFunc(UWord func_id) {
 void initUnknownFunc(VgHashTable func_ht) 
 {
    PG_Func *func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
-   func->call_history = VG_(malloc) ("func_ht.node.callhistory", sizeof (PG_CallHistory));
+   func->call_history = VG_(malloc) ("func_ht.node.call_history", sizeof (PG_CallHistory));
    func->fnname = "<Unknown>";
    func->filename = "";
    func->dirname = "";
@@ -37,6 +37,7 @@ void initUnknownFunc(VgHashTable func_ht)
    func->id = curr_func_id++;
    tl_assert(func->id == UNKNOWN_FUNC_ID);
    func->call_history->calls_ht = VG_(HT_construct) ( "calls_hash" );
+   func->call_history->next = NULL;
    VG_(HT_add_node) ( func_ht, func );
    addFunc(func);
 }
@@ -55,7 +56,7 @@ UWord getFuncId( Addr addr, VgHashTable func_ht)
       UInt linenum;
       Bool dirname_available;
       func = VG_(malloc) ("func_ht.node", sizeof (PG_Func));
-      func->call_history = VG_(malloc) ("func_ht.node", sizeof (PG_CallHistory));
+      func->call_history = VG_(malloc) ("func_ht.node.call_history", sizeof (PG_CallHistory));
       func->key = key;
       func->id = curr_func_id++;
       func->fnname = VG_(malloc) ("func_ht.node.fnname", strlen(fnname));
@@ -66,6 +67,7 @@ UWord getFuncId( Addr addr, VgHashTable func_ht)
 				  func->dirname,  DIRNAME_LENGTH,
 				  &dirname_available, &linenum );
       func->call_history->calls_ht = VG_(HT_construct) ( "calls_hash" );
+      func->call_history->next = NULL;
       VG_(HT_add_node) ( func_ht, func );
       addFunc(func);
     }
