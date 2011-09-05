@@ -374,9 +374,19 @@ static void dump_info()
 
 static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
 {
-  PG_Func *caller_func; 
+  PG_Func *caller_func;
+  PG_Func *target_func;
+  PG_CallHistory *call_history;  
   PG_Calls *target;
-
+  
+  /* Extend call history list */
+  target_func = getFunc(target_func_id);
+  tl_assert(target_func != NULL);
+  call_history = VG_(malloc) ("func_ht.node.call_history", sizeof (PG_CallHistory));
+  call_history->calls_ht = VG_(HT_construct) ( "calls_hash" );
+  call_history->next = target_func->call_history;
+  target_func->call_history = call_history;    
+  
   caller_func = getFunc(caller_func_id);
   tl_assert(caller_func != NULL);
   target = VG_(HT_lookup) ( caller_func->call_history->calls_ht, target_func_id );
