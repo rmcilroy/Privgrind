@@ -308,27 +308,6 @@ static VG_REGPARM(3) void trace_modify(Addr addr, SizeT size, UWord func_id)
 }
 
 
-/* Output data object details */
-static void pg_out_obj (PG_PageRange * page, PG_DataObj * addr)
-{
-  PG_Access  * access;
-  
-	addr = freed_objs.first;
-	while (addr != NULL) {
-	  if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
-	VG_(printf) ("ADDR: 0x%lx\n", addr->addr);
-	VG_(HT_ResetIter)(addr->access_ht);
-	while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
-	  VG_(printf) ("  ACCESS: %lu, %lu, %lu\n", access->func_id,
-			   access->bytes_read, access->bytes_written);
-	}
-	VG_(HT_destruct) (addr->access_ht);
-	  }
-	  addr = addr->next;
-	}
-}
-
-
 static void dump_info()
 {
 	
@@ -398,17 +377,27 @@ static void dump_info()
 
 static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
 {
-  PG_Func *caller_func; 
+  PG_Func *caller_func;
+  PG_Func *target_func;
+  PG_CallHistory *call_history;  
   PG_Calls *target;
-
+  
+  /* Extend call history list */
+  target_func = getFunc(target_func_id);
+  tl_assert(target_func != NULL);
+  call_history = VG_(malloc) ("func_ht.node.call_history", sizeof (PG_CallHistory));
+  call_history->calls_ht = VG_(HT_construct) ( "calls_hash" );
+  call_history->next = target_func->call_history;
+  target_func->call_history = call_history;    
+  
   caller_func = getFunc(caller_func_id);
   tl_assert(caller_func != NULL);
-  target = VG_(HT_lookup) ( caller_func->calls_ht, target_func_id );
+  target = VG_(HT_lookup) ( caller_func->call_history->calls_ht, target_func_id );
   if (target == NULL) {
     target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     target->target_id = target_func_id;
     target->count = 0;
-    VG_(HT_add_node) ( caller_func->calls_ht, target );
+    VG_(HT_add_node) ( caller_func->call_history->calls_ht, target );
   }
   target->count++;
   
@@ -433,12 +422,12 @@ static VG_REGPARM(2) void trace_call_indirect(UWord caller_func_id,
   tl_assert(caller_func != NULL);
   target_func_id = getFuncId(target_addr, func_ht);
 
-  target = VG_(HT_lookup) ( caller_func->calls_ht, target_func_id );
+  target = VG_(HT_lookup) ( caller_func->call_history->calls_ht, target_func_id );
   if (target == NULL) {
     target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     target->target_id = target_func_id;
     target->count = 0;
-    VG_(HT_add_node) ( caller_func->calls_ht, target );
+    VG_(HT_add_node) ( caller_func->call_history->calls_ht, target );
   }
   target->count++;
 }
@@ -813,16 +802,27 @@ static void pg_out_fun (void)
 
 	PG_Func * func;
 	PG_Calls * call;
+	PG_CallHistory * call_history;
+	unsigned int i;
 	
   VG_(HT_ResetIter)(func_ht);
   while ( (func = VG_(HT_Next)(func_ht)) ) {
     VG_(printf) ("FUNC: %lu %s (%s%s)\n", func->id, func->fnname,
 		 func->dirname, func->filename);
     if (clo_trace_calls) {
-      VG_(HT_ResetIter)(func->calls_ht);
-      while ( (call = VG_(HT_Next)(func->calls_ht)) ) {
-	VG_(printf) ("  CALL: %lu, %lu \n", call->target_id, call->count);
+	  
+      i=0;
+      call_history = func->call_history;
+      while (call_history != NULL) {
+		  VG_(printf) ("  ITERATION: %lu \n", i );
+		  VG_(HT_ResetIter)(call_history->calls_ht);
+		  while ( (call = VG_(HT_Next)(call_history->calls_ht)) ) {
+			VG_(printf) ("  	CALL: %lu, %lu \n", call->target_id, call->count);
+		  }
+		  call_history = call_history->next;
+		  i++;
       }
+      
     }
     if (func->id != UNKNOWN_FUNC_ID) { 
       VG_(free) (func->fnname);
@@ -832,6 +832,27 @@ static void pg_out_fun (void)
   }
 }
 
+/* Output data object details */
+static void pg_out_obj (PG_PageRange * page, PG_DataObj * addr)
+{
+  PG_Access  * access;
+  
+	addr = freed_objs.first;
+	while (addr != NULL) {
+		if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
+			VG_(printf) ("ADDR: 0x%lx\n", addr->addr);
+			VG_(HT_ResetIter)(addr->access_ht);
+			while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
+			  VG_(printf) ("  ACCESS: %lu, %lu, %lu\n", access->func_id,
+					   access->bytes_read, access->bytes_written);
+			}
+		
+		VG_(HT_destruct) (addr->access_ht);
+		
+		}
+	  addr = addr->next;
+	}
+}
 
 static void pg_fini(Int exitcode)
 {
@@ -841,8 +862,11 @@ static void pg_fini(Int exitcode)
   /* Output function details */
 	pg_out_fun();
 
+
   if (clo_trace_mem) {
-    /* Scan through live list, adding to freed list */
+	  
+/*
+    // Scan through live list, adding to freed list
     VG_(HT_ResetIter)(live_ht);
     while ( (page = VG_(HT_Next)(live_ht)) ) {
       addr = page->first;
@@ -852,9 +876,10 @@ static void pg_fini(Int exitcode)
 				addr = next;
       }
     }
-	
-		/* Output data object details */
-		pg_out_obj(page, addr);
+*/
+
+	// Output data object details
+	pg_out_obj(page, addr);
 	
   }
 

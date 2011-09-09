@@ -47,9 +47,17 @@ typedef
       Char *            filename;
       Char *            dirname;
       UWord             id;
-      VgHashTable       calls_ht;
+      struct _PG_CallHistory* call_history;	
    }
    PG_Func;
+   
+/* This describes call history. */
+typedef
+	struct _PG_CallHistory {
+		struct _PG_CallHistory* 	next;
+		VgHashTable					calls_ht;
+	}
+	PG_CallHistory;
 
 /* This describes access to a data object. Nb: first two fields must match 
  * core's VgHashNode. */
