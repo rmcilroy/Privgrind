@@ -255,7 +255,6 @@ static Int events_used = 0;
 static void update_access(Addr addr, UWord func_id,  SizeT bytes_read, 
 			  SizeT bytes_written)
 {
-  int i;
   /* look up address in malloced list */
   PG_DataObj * addr_node = PG_(dataobj_get_node)( addr );
   if (addr_node == NULL) {
@@ -266,6 +265,10 @@ static void update_access(Addr addr, UWord func_id,  SizeT bytes_read,
       /* Treat this global as having been malloced to add it to the list
 	 of addresses traced */
       addr_node = PG_(dataobj_node_malloced)( glob_start, glob_size );
+    } else if (VG_(DebugInfo_sect_kind)( NULL, 0, addr) == Vg_SectData) {
+      /* If it is in the data section, just add an object based on access */
+      addr_node = PG_(dataobj_node_malloced)( addr, 
+			bytes_read == 0 ? bytes_read : bytes_written);
     }
   }
   if (addr_node != NULL) {
