@@ -274,12 +274,26 @@ static void update_access(Addr addr, UWord func_id,  SizeT bytes_read,
   if (addr_node != NULL) {
     PG_Access* access_node = VG_(HT_lookup) ( addr_node->access_ht, func_id );
     if (access_node == NULL) {
-      access_node = VG_(malloc) ("trace_load.access_node", sizeof(PG_Access) );
-      access_node->func_id = func_id;
-      access_node->bytes_read = 0;
-      access_node->bytes_written = 0;
-      VG_(HT_add_node) (addr_node->access_ht, access_node);
-    }
+		access_node = VG_(malloc) ("trace_load.access_node", sizeof(PG_Access) );
+		access_node->func_id = func_id;
+		/* Lookup iteration */
+		access_node->iteration = getFunc(func_id)->iteration;
+		access_node->bytes_read = 0;
+		access_node->bytes_written = 0;
+		VG_(HT_add_node) (addr_node->access_ht, access_node);
+    } else if (access_node->iteration < getFunc(func_id)->iteration) {
+		/* If more recent function iteration, create new node */
+		PG_Access* new_access_node = VG_(malloc) ("trace_load.access_node", sizeof(PG_Access) );
+		new_access_node->func_id = func_id;
+		/* Lookup iteration */
+		new_access_node->iteration = getFunc(func_id)->iteration;
+		new_access_node->bytes_read = 0;
+		new_access_node->bytes_written = 0;
+		/* Insert into node list */
+		new_access_node->ll_next = access_node;
+		VG_(HT_remove) ( addr_node->access_ht, func_id );
+		VG_(HT_add_node) (addr_node->access_ht, new_access_node);
+	}
     access_node->bytes_read += bytes_read;
     access_node->bytes_written += bytes_written;
   }
@@ -389,6 +403,7 @@ static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
   call_history->calls_ht = VG_(HT_construct) ( "calls_hash" );
   call_history->next = target_func->call_history;
   target_func->call_history = call_history;    
+  target_func->iteration++;
   
   caller_func = getFunc(caller_func_id);
   tl_assert(caller_func != NULL);
@@ -414,13 +429,24 @@ static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
 static VG_REGPARM(2) void trace_call_indirect(UWord caller_func_id, 
 					      Addr target_addr)
 {
-  PG_Func *caller_func; 
+  PG_Func *caller_func;
+  PG_Func *target_func;
+  PG_CallHistory *call_history;  
   PG_Calls *target;
   UWord target_func_id;
   
   caller_func = getFunc(caller_func_id);
   tl_assert(caller_func != NULL);
   target_func_id = getFuncId(target_addr, func_ht);
+  
+  /* Extend call history list */
+  target_func = getFunc(target_func_id);
+  tl_assert(target_func != NULL);
+  call_history = VG_(malloc) ("func_ht.node.call_history", sizeof (PG_CallHistory));
+  call_history->calls_ht = VG_(HT_construct) ( "calls_hash" );
+  call_history->next = target_func->call_history;
+  target_func->call_history = call_history;    
+  target_func->iteration++;
 
   target = VG_(HT_lookup) ( caller_func->call_history->calls_ht, target_func_id );
   if (target == NULL) {
@@ -843,8 +869,14 @@ static void pg_out_obj (PG_PageRange * page, PG_DataObj * addr)
 			VG_(printf) ("ADDR: 0x%lx\n", addr->addr);
 			VG_(HT_ResetIter)(addr->access_ht);
 			while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
-			  VG_(printf) ("  ACCESS: %lu, %lu, %lu\n", access->func_id,
-					   access->bytes_read, access->bytes_written);
+				
+				while (access != NULL) { 
+					VG_(printf) ("  ACCESS: %lu, iter:%u, %lu, %lu\n",
+						access->func_id, access->iteration,
+						access->bytes_read, access->bytes_written);
+					access = access->ll_next;
+				}
+						
 			}
 		
 		VG_(HT_destruct) (addr->access_ht);

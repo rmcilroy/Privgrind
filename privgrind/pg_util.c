@@ -38,6 +38,7 @@ void initUnknownFunc(VgHashTable func_ht)
    tl_assert(func->id == UNKNOWN_FUNC_ID);
    func->call_history->calls_ht = VG_(HT_construct) ( "calls_hash" );
    func->call_history->next = NULL;
+   func->iteration = 0;
    VG_(HT_add_node) ( func_ht, func );
    addFunc(func);
 }
@@ -68,6 +69,7 @@ UWord getFuncId( Addr addr, VgHashTable func_ht)
 				  &dirname_available, &linenum );
       func->call_history->calls_ht = VG_(HT_construct) ( "calls_hash" );
       func->call_history->next = NULL;
+      func->iteration = 0;
       VG_(HT_add_node) ( func_ht, func );
       addFunc(func);
     }

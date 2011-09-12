@@ -47,6 +47,7 @@ typedef
       Char *            filename;
       Char *            dirname;
       UWord             id;
+      unsigned int		iteration;
       struct _PG_CallHistory* call_history;	
    }
    PG_Func;
@@ -84,8 +85,10 @@ typedef
    struct _PG_Access {
       struct _PG_Access*  next;
       UWord               func_id;
+      unsigned int		  iteration;
       UWord               bytes_read;
       UWord               bytes_written;
+      struct _PG_Access*  ll_next;
    }
    PG_Access;
 
