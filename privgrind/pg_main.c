@@ -14,7 +14,8 @@
 #include "pub_tool_xarray.h"    
 #include "pub_tool_debuginfo.h"    
 
-static Char* clo_privgrind_out_file = "privgrind.out.%p";
+static Bool clo_json       = True;
+static Char* clo_json_file = "data.json";
 static Char* clo_boundary_fun = 0;
 static Bool clo_trace_mem       = True;
 static Bool clo_trace_calls     = True;
@@ -32,8 +33,9 @@ static Bool pg_process_cmd_line_option(Char* arg)
 {
    if 	   VG_BOOL_CLO(arg, "--trace-mem", clo_trace_mem) {}
    else if VG_BOOL_CLO(arg, "--trace-calls", clo_trace_calls) {}
+   else if VG_BOOL_CLO(arg, "--json", clo_json) {}
    else if VG_STR_CLO( arg, "--boundary-function", clo_boundary_fun) {}
-   else if VG_STR_CLO( arg, "--privgrind-out-file", clo_privgrind_out_file) {}
+   else if VG_STR_CLO( arg, "--json-file", clo_json_file) {}
    else return False;
    
    tl_assert(clo_trace_mem || clo_trace_calls);
@@ -43,7 +45,8 @@ static Bool pg_process_cmd_line_option(Char* arg)
 static void pg_print_usage(void)
 {  
    VG_(printf)(
-"    --privgrind-out-file=<f>  Output file name [privgrind.out.%%p]\n"
+"    --json=no|yes             emit output in JSON [yes]\n"
+"    --json-file=<file>        JSON output to <file> [data.json]\n"
 "    --boundary-function=<f>   Dump information when entering boundary function\n"
 "    --trace-mem=no|yes        Trace all memory accesses by function [yes]\n"
 "    --trace-calls=no|yes      Trace all calls made by the calling function [yes]\n"
@@ -322,73 +325,6 @@ static VG_REGPARM(3) void trace_modify(Addr addr, SizeT size, UWord func_id)
 }
 
 
-static void dump_info()
-{
-	
-	Int     fd;
-	SysRes  sres;
-	Char    buf[512];
-   
-	PG_PageRange * page;
-	PG_DataObj * addr;
-	PG_Access  * access;
-
-   // Setup output filename.  Nb: it's important to do this now, ie. as late
-   // as possible.  If we do it at start-up and the program forks and the
-   // output file format string contains a %p (pid) specifier, both the
-   // parent and child will incorrectly write to the same file;  this
-   // happened in 3.3.0.
-   Char* privgrind_out_file =
-      VG_(expand_file_name)("--privgrind-out-file", clo_privgrind_out_file);
-
-   sres = VG_(open)(privgrind_out_file, VKI_O_CREAT|VKI_O_TRUNC|VKI_O_WRONLY,
-                                         VKI_S_IRUSR|VKI_S_IWUSR);
-   if (sr_isError(sres)) {
-      // If the file can't be opened for whatever reason (conflict
-      // between multiple privgrinded processes?), give up now.
-      VG_(umsg)("error: can't open Privgrind output file '%s'\n",
-                privgrind_out_file );
-      VG_(umsg)("       ... so output will be missing.\n");
-      VG_(free)(privgrind_out_file);
-      return;
-   } else {
-      fd = sr_Res(sres);
-      VG_(free)(privgrind_out_file);
-   }
-   
-	/* Scan through pages from live_ht */
-	VG_(HT_ResetIter)(live_ht);
-	while ( (page = VG_(HT_Next)(live_ht)) ) {
-	  
-		/* Scan through addresses */
-		addr = page->first;
-		while ( addr != NULL ) {
-		
-			if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
-
-				VG_(sprintf) (buf, "ADDR: 0x%lx\n", addr->addr);
-				VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
-				
-				VG_(HT_ResetIter)(addr->access_ht);
-
-				/* Scan through accesses */
-				while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
-					VG_(sprintf) (buf, "  ACCESS: %lu, %lu, %lu\n", access->func_id,
-						   access->bytes_read, access->bytes_written);
-					VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
-				}
-			
-			}
-		
-			addr = addr->next;
-		}
-	}
-
-   // Close file
-   VG_(close) (fd);
-   	
-}
-
 static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
 {
   PG_Func *caller_func;
@@ -419,8 +355,7 @@ static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
    // Check for a marker function call
   if (target_func_id == 27) {
 	  if (clo_trace_mem) {
-		  // Dump info to file
-		  dump_info();
+		  // TODO - live output on boundary function detection
 	  }
   }
   
@@ -886,6 +821,74 @@ static void pg_out_obj (PG_PageRange * page, PG_DataObj * addr)
 	}
 }
 
+static void dump_info()
+{
+	
+	Int     fd;
+	SysRes  sres;
+	Char    buf[512];
+   
+	PG_PageRange * page;
+	PG_DataObj * addr;
+	PG_Access  * access;
+
+   // Setup output filename.  Nb: it's important to do this now, ie. as late
+   // as possible.  If we do it at start-up and the program forks and the
+   // output file format string contains a %p (pid) specifier, both the
+   // parent and child will incorrectly write to the same file;  this
+   // happened in 3.3.0.
+   Char* json_file =
+      VG_(expand_file_name)("--privgrind-out-file", clo_json_file);
+
+   sres = VG_(open)(json_file, VKI_O_CREAT|VKI_O_TRUNC|VKI_O_WRONLY,
+                                         VKI_S_IRUSR|VKI_S_IWUSR);
+   if (sr_isError(sres)) {
+      // If the file can't be opened for whatever reason (conflict
+      // between multiple privgrinded processes?), give up now.
+      VG_(umsg)("error: can't open JSON output file '%s'\n",
+                json_file );
+      VG_(umsg)("       ... so output will be missing.\n");
+      VG_(free)(json_file);
+      return;
+   } else {
+      fd = sr_Res(sres);
+      VG_(free)(json_file);
+   }
+   
+	/* Scan through pages from live_ht */
+	addr = freed_objs.first;
+	while (addr != NULL) {
+		
+		if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
+
+			VG_(sprintf) (buf, "ADDR: 0x%lx\n", addr->addr);
+			VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+			
+			/* Scan through accesses */
+			VG_(HT_ResetIter)(addr->access_ht);
+			while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
+				
+				while (access != NULL) { 
+					VG_(sprintf) (buf, "  ACCESS: %lu, iter:%u, %lu, %lu\n",
+						access->func_id, access->iteration,
+						access->bytes_read, access->bytes_written);
+					VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+					access = access->ll_next;
+				}
+				
+			}
+		
+		}
+		
+		addr = addr->next;
+	}
+
+   // Close file
+   VG_(close) (fd);
+   	
+}
+
+
 static void pg_fini(Int exitcode)
 {
   PG_PageRange * page;
@@ -910,6 +913,8 @@ static void pg_fini(Int exitcode)
     }
 */
 
+	if (clo_json) dump_info();
+	
 	// Output data object details
 	pg_out_obj(page, addr);
 	
