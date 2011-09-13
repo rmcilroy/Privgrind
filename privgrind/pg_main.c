@@ -332,7 +332,7 @@ static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
   PG_CallHistory *call_history;  
   PG_Calls *target;
   
-  /* Extend call history list */
+  /* Extend target call history list to next iteration */
   target_func = getFunc(target_func_id);
   tl_assert(target_func != NULL);
   call_history = VG_(malloc) ("func_ht.node.call_history", sizeof (PG_CallHistory));
@@ -343,15 +343,27 @@ static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
   
   caller_func = getFunc(caller_func_id);
   tl_assert(caller_func != NULL);
+  
+  /* Append call to source caller */
   target = VG_(HT_lookup) ( caller_func->call_history->calls_ht, target_func_id );
   if (target == NULL) {
+	// Create new hash table node
     target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     target->target_id = target_func_id;
-    target->count = 0;
+    target->iteration = target_func->iteration;
+    target->next = NULL;
     VG_(HT_add_node) ( caller_func->call_history->calls_ht, target );
+  } else {
+	// Extend hash table linked list for this call
+    PG_Calls *new_target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
+    new_target->target_id = target_func_id;
+    new_target->iteration = target_func->iteration;
+    new_target->next = target;
+    VG_(HT_remove) ( caller_func->call_history->calls_ht, target_func_id  );
+	VG_(HT_add_node) (caller_func->call_history->calls_ht, new_target);
   }
-  target->count++;
-  
+
+
    // Check for a marker function call
   if (target_func_id == 27) {
 	  if (clo_trace_mem) {
@@ -382,15 +394,26 @@ static VG_REGPARM(2) void trace_call_indirect(UWord caller_func_id,
   call_history->next = target_func->call_history;
   target_func->call_history = call_history;    
   target_func->iteration++;
-
+  
+  /* Append call to source caller */
   target = VG_(HT_lookup) ( caller_func->call_history->calls_ht, target_func_id );
   if (target == NULL) {
+	// Create new hash table node
     target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     target->target_id = target_func_id;
-    target->count = 0;
+    target->iteration = target_func->iteration;
+    target->next = NULL;
     VG_(HT_add_node) ( caller_func->call_history->calls_ht, target );
+  } else {
+	// Extend hash table linked list for this call
+    PG_Calls *new_target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
+    new_target->target_id = target_func_id;
+    new_target->iteration = target_func->iteration;
+    new_target->next = target;
+    VG_(HT_remove) ( caller_func->call_history->calls_ht, target_func_id  );
+	VG_(HT_add_node) (caller_func->call_history->calls_ht, new_target);
   }
-  target->count++;
+  
 }
 
 static void flushEvents(IRSB* sb)
@@ -770,6 +793,7 @@ static void pg_out_fun (void)
   while ( (func = VG_(HT_Next)(func_ht)) ) {
     VG_(printf) ("FUNC: %lu %s (%s%s)\n", func->id, func->fnname,
 		 func->dirname, func->filename);
+		 
     if (clo_trace_calls) {
 	  
       i=0;
@@ -778,17 +802,20 @@ static void pg_out_fun (void)
 		  VG_(printf) ("  ITERATION: %lu \n", i );
 		  VG_(HT_ResetIter)(call_history->calls_ht);
 		  while ( (call = VG_(HT_Next)(call_history->calls_ht)) ) {
-			VG_(printf) ("  	CALL: %lu, %lu \n", call->target_id, call->count);
+			  
+			while (call != NULL) {
+				
+				VG_(printf) ("  	CALL: %lu, iter:%u \n",
+				call->target_id, call->iteration);
+				
+				call = call->ll_next;
+			}
+		  
 		  }
 		  call_history = call_history->next;
 		  i++;
       }
       
-    }
-    if (func->id != UNKNOWN_FUNC_ID) { 
-      VG_(free) (func->fnname);
-      VG_(free) (func->filename);
-      VG_(free) (func->dirname);
     }
   }
 }
@@ -868,9 +895,12 @@ static void dump_info()
 			VG_(HT_ResetIter)(addr->access_ht);
 			while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
 				
-				while (access != NULL) { 
-					VG_(sprintf) (buf, "  ACCESS: %lu, iter:%u, %lu, %lu\n",
-						access->func_id, access->iteration,
+				while (access != NULL) {
+					
+					PG_Func* func = getFunc(access->func_id);
+					
+					VG_(sprintf) (buf, "  ACCESS: %s, iter:%u, %lu, %lu\n",
+						func->fnname, access->iteration,
 						access->bytes_read, access->bytes_written);
 					VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
 					access = access->ll_next;
@@ -888,6 +918,24 @@ static void dump_info()
    	
 }
 
+/* Free up function table */
+static void pg_free_table (void)
+{
+
+	PG_Func * func;
+	PG_Calls * call;
+	PG_CallHistory * call_history;
+	unsigned int i;
+	
+  VG_(HT_ResetIter)(func_ht);
+  while ( (func = VG_(HT_Next)(func_ht)) ) {
+    if (func->id != UNKNOWN_FUNC_ID) { 
+      VG_(free) (func->fnname);
+      VG_(free) (func->filename);
+      VG_(free) (func->dirname);
+    }
+  }
+}
 
 static void pg_fini(Int exitcode)
 {
@@ -919,6 +967,9 @@ static void pg_fini(Int exitcode)
 	pg_out_obj(page, addr);
 	
   }
+  
+  /* Release memory for function table */
+  pg_free_table();
 
   VG_(HT_destruct) (func_ht);
   VG_(HT_destruct) (live_ht);

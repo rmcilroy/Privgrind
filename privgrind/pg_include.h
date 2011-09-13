@@ -33,7 +33,8 @@ typedef
     struct _PG_Calls {
        struct _PG_Calls * next;
        UWord              target_id;
-       UWord              count;
+	   unsigned int		  iteration;
+       struct _PG_Calls * ll_next;
     }
     PG_Calls;
 
@@ -48,7 +49,7 @@ typedef
       Char *            dirname;
       UWord             id;
       unsigned int		iteration;
-      struct _PG_CallHistory* call_history;	
+      struct _PG_CallHistory* call_history;		
    }
    PG_Func;
    
