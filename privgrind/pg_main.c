@@ -351,14 +351,14 @@ static VG_REGPARM(2) void trace_call(UWord caller_func_id, UWord target_func_id)
     target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     target->target_id = target_func_id;
     target->iteration = target_func->iteration;
-    target->next = NULL;
+    target->ll_next = NULL;
     VG_(HT_add_node) ( caller_func->call_history->calls_ht, target );
   } else {
 	// Extend hash table linked list for this call
     PG_Calls *new_target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     new_target->target_id = target_func_id;
     new_target->iteration = target_func->iteration;
-    new_target->next = target;
+    new_target->ll_next = target;
     VG_(HT_remove) ( caller_func->call_history->calls_ht, target_func_id  );
 	VG_(HT_add_node) (caller_func->call_history->calls_ht, new_target);
   }
@@ -402,14 +402,14 @@ static VG_REGPARM(2) void trace_call_indirect(UWord caller_func_id,
     target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     target->target_id = target_func_id;
     target->iteration = target_func->iteration;
-    target->next = NULL;
+    target->ll_next = NULL;
     VG_(HT_add_node) ( caller_func->call_history->calls_ht, target );
   } else {
 	// Extend hash table linked list for this call
     PG_Calls *new_target = VG_(malloc) ("trace_calls.calls", sizeof(PG_Calls));
     new_target->target_id = target_func_id;
     new_target->iteration = target_func->iteration;
-    new_target->next = target;
+    new_target->ll_next = target;
     VG_(HT_remove) ( caller_func->call_history->calls_ht, target_func_id  );
 	VG_(HT_add_node) (caller_func->call_history->calls_ht, new_target);
   }
@@ -796,9 +796,9 @@ static void pg_out_fun (void)
 		 
     if (clo_trace_calls) {
 	  
-      i=0;
+      i=func->iteration;
       call_history = func->call_history;
-      while (call_history != NULL) {
+      while (i>0) {
 		  VG_(printf) ("  ITERATION: %lu \n", i );
 		  VG_(HT_ResetIter)(call_history->calls_ht);
 		  while ( (call = VG_(HT_Next)(call_history->calls_ht)) ) {
@@ -813,7 +813,7 @@ static void pg_out_fun (void)
 		  
 		  }
 		  call_history = call_history->next;
-		  i++;
+		  i--;
       }
       
     }
@@ -848,7 +848,7 @@ static void pg_out_obj (PG_PageRange * page, PG_DataObj * addr)
 	}
 }
 
-static void dump_info()
+static void pg_write_json()
 {
 	
 	Int     fd;
@@ -858,6 +858,11 @@ static void dump_info()
 	PG_PageRange * page;
 	PG_DataObj * addr;
 	PG_Access  * access;
+   	PG_Func * func;
+   	PG_Func * func_temp;
+	PG_Calls * call;
+	PG_CallHistory * call_history;
+	unsigned int i;
 
    // Setup output filename.  Nb: it's important to do this now, ie. as late
    // as possible.  If we do it at start-up and the program forks and the
@@ -865,7 +870,7 @@ static void dump_info()
    // parent and child will incorrectly write to the same file;  this
    // happened in 3.3.0.
    Char* json_file =
-      VG_(expand_file_name)("--privgrind-out-file", clo_json_file);
+      VG_(expand_file_name)("--json-file", clo_json_file);
 
    sres = VG_(open)(json_file, VKI_O_CREAT|VKI_O_TRUNC|VKI_O_WRONLY,
                                          VKI_S_IRUSR|VKI_S_IWUSR);
@@ -881,37 +886,122 @@ static void dump_info()
       fd = sr_Res(sres);
       VG_(free)(json_file);
    }
-   
-	/* Scan through pages from live_ht */
-	addr = freed_objs.first;
-	while (addr != NULL) {
-		
-		if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
 
-			VG_(sprintf) (buf, "ADDR: 0x%lx\n", addr->addr);
-			VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
-			
-			/* Scan through accesses */
-			VG_(HT_ResetIter)(addr->access_ht);
-			while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
-				
-				while (access != NULL) {
-					
-					PG_Func* func = getFunc(access->func_id);
-					
-					VG_(sprintf) (buf, "  ACCESS: %s, iter:%u, %lu, %lu\n",
-						func->fnname, access->iteration,
-						access->bytes_read, access->bytes_written);
-					VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
-					access = access->ll_next;
-				}
-				
+   // Output start of JSON 
+   VG_(sprintf) (buf, "{\n	\"functions\":[\n");
+   VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+
+   // Output list of functions
+	VG_(HT_ResetIter)(func_ht);
+	while ( (func = VG_(HT_Next)(func_ht)) ) {	  
+		i=func->iteration;
+		call_history = func->call_history;
+		while (i>0) {
+			// Output JSON string for function
+			if (func->id != 0) {
+				VG_(sprintf) (buf,
+					"		{\"id\":%u, \"iteration\":%u, \"label\":\"%s\" },\n",
+					func->id, i, func->fnname
+				);
+				VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
 			}
-		
+			call_history = call_history->next;
+			i--;
 		}
-		
+	}
+	
+	VG_(sprintf) (buf,"		{}\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+	VG_(sprintf) (buf, "	],\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+
+	// Write function call links
+	VG_(sprintf) (buf, "\n	\"calls\":[\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+	VG_(HT_ResetIter)(func_ht);
+	unsigned int j = 0;
+	while ( (func = VG_(HT_Next)(func_ht)) ) {	  
+		i=func->iteration;
+		call_history = func->call_history;
+		while (i>0) {
+			VG_(HT_ResetIter)(call_history->calls_ht);
+			while ( (call = VG_(HT_Next)(call_history->calls_ht)) ) {
+				while (call != NULL) {
+					func_temp = getFunc(call->target_id);
+					// Output JSON string for link
+					if (func->id != 0 && call->target_id!=0) {
+						VG_(sprintf) (buf,
+							"		{\"id\":%u, "
+							"\"source_id\":%u,  \"source_iteration\":%u, "
+							"\"target_id\":%u, \"target_iteration\":%u },\n",
+							j++, func->id, i, call->target_id, call->iteration
+						);
+						VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+					}
+					call = call->ll_next;
+				}
+			}
+			call_history = call_history->next;
+			i--;
+		}
+	}
+	VG_(sprintf) (buf,"		{}\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+
+	
+	VG_(sprintf) (buf, "	],\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+   
+
+	// Write data access nodes
+	VG_(sprintf) (buf, "\n	\"locations\":[\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+	addr = freed_objs.first;
+	j = 0;
+	while (addr != NULL) {
+		if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
+			VG_(sprintf) (buf, "		{\"id\":%lu },\n", addr->addr);
+			VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+		}
 		addr = addr->next;
 	}
+	VG_(sprintf) (buf,"		{}\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+	VG_(sprintf) (buf, "	],\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+
+
+	// Write data access links
+	VG_(sprintf) (buf, "\n	\"accesses\":[\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+	addr = freed_objs.first;
+	j=0;
+	while (addr != NULL) {
+		if (VG_(HT_count_nodes) (addr->access_ht) > 1) {
+			// Scan through accesses
+			VG_(HT_ResetIter)(addr->access_ht);
+			while ( (access = VG_(HT_Next)(addr->access_ht)) ) {
+				while (access != NULL) {
+					
+					func_temp = getFunc(access->func_id);
+					
+					VG_(sprintf) (buf, "		{\"id\":%lu, "
+						"\"source_id\":%lu, \"source_iteration\":%lu, \"target_id\":%lu, "
+						"\"bytes_read\":%lu, \"bytes_written\":%lu},\n",
+						j++, access->func_id, access->iteration, addr->addr,
+						access->bytes_read, access->bytes_written);
+					VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+					
+					access = access->ll_next;
+				}
+			}
+		}
+		addr = addr->next;
+	}
+	VG_(sprintf) (buf,"		{}\n");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
+	VG_(sprintf) (buf, "	]\n}");
+	VG_(write)(fd, (void*)buf, VG_(strlen)(buf));
 
    // Close file
    VG_(close) (fd);
@@ -921,11 +1011,7 @@ static void dump_info()
 /* Free up function table */
 static void pg_free_table (void)
 {
-
 	PG_Func * func;
-	PG_Calls * call;
-	PG_CallHistory * call_history;
-	unsigned int i;
 	
   VG_(HT_ResetIter)(func_ht);
   while ( (func = VG_(HT_Next)(func_ht)) ) {
@@ -947,8 +1033,7 @@ static void pg_fini(Int exitcode)
 
 
   if (clo_trace_mem) {
-	  
-/*
+/*	  
     // Scan through live list, adding to freed list
     VG_(HT_ResetIter)(live_ht);
     while ( (page = VG_(HT_Next)(live_ht)) ) {
@@ -961,7 +1046,7 @@ static void pg_fini(Int exitcode)
     }
 */
 
-	if (clo_json) dump_info();
+	if (clo_json) pg_write_json();
 	
 	// Output data object details
 	pg_out_obj(page, addr);
